@@ -152,13 +152,13 @@ if check_password():
                     message_placeholder = st.empty()
                     try:
                         response = client.messages.create(
-                            model="claude-3-5-sonnet-latest",
+                            model="claude-sonnet-5-5",
                             max_tokens=1500,
                             system="Eres F.O.R.M.U.L.A., una inteligencia artificial analítica avanzada con la estética, precisión y el tono sofisticado de JARVIS en las películas de Tony Stark. Respondes de forma concisa, técnica y ejecutiva en español.",
                             messages=[{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
                         )
-                        full_response = response.content[0].text
-                        message_placeholder.markdown(full_response)
+                        full_response = "".join(b.text for b
+                        in response.content if b.type == "text")
                         
                         # Ejecuta la voz sintética
                         speak(full_response)
