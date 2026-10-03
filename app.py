@@ -1,6 +1,8 @@
 import io
 import json
 import re
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -18,6 +20,11 @@ CHAT_ALTURA = 300
 
 SYSTEM_PROMPT = """Eres F.O.R.M.U.L.A., una inteligencia artificial analítica avanzada con la estética, precisión y el tono sofisticado de JARVIS en las películas de Tony Stark. Respondes de forma concisa, técnica y ejecutiva en español latinoamericano.
 
+## Formato de cada respuesta
+1. Empieza siempre con una frase hablada dentro de <voz>…</voz>: máximo 2 oraciones cortas, con tono de JARVIS, sin cifras detalladas, listas ni tablas. Es lo único que se lee en voz alta.
+2. Después de esa etiqueta escribe en pantalla el contenido completo: reportes, análisis, hallazgos, tablas y recomendaciones, en Markdown. Nunca pongas el reporte dentro de <voz>.
+Si la respuesta es solo una conversación breve, basta con la frase de <voz>.
+
 Puedes analizar los archivos de datos que el usuario cargue; su contenido aparece más abajo en formato CSV.
 
 Cuando el usuario te pida crear o exportar un archivo, escribe su contenido completo dentro de una etiqueta así:
@@ -25,6 +32,9 @@ Cuando el usuario te pida crear o exportar un archivo, escribe su contenido comp
 contenido
 </archivo>
 Formatos permitidos: .xlsx, .csv, .txt, .md, .json. Para .xlsx y .csv escribe el contenido como CSV separado por comas, con una fila de encabezados; el sistema lo convierte a Excel automáticamente. No uses bloques de código dentro de la etiqueta. Fuera de la etiqueta, explica en una o dos frases qué contiene el archivo."""
+
+PATRON_VOZ = re.compile(r"<voz>\s*(.*?)\s*</voz>", re.DOTALL)
+FRASE_POR_DEFECTO = "Análisis completado. Los resultados están en pantalla."
 
 PATRON_ARCHIVO = re.compile(r'<archivo\s+nombre="([^"]+)"\s*>\s*(.*?)\s*</archivo>', re.DOTALL)
 
@@ -343,55 +353,107 @@ def panel(titulo, contenido):
     )
 
 
-# Función de síntesis de voz (IA habla) con voz masculina de español latino
-def speak(text):
+# Script de voz: masculina, español latino. Se ejecuta en la ventana principal para que
+# el botón 🔇 pueda detenerla. "__BIENVENIDA__" hace que el saludo suene una sola vez por visita.
+VOZ_JS = """
+<script>
+    const ventana = window.parent;
+    const synth = ventana.speechSynthesis;
+    const esBienvenida = __BIENVENIDA__;
+
+    // Variantes de español de Latinoamérica
+    const LATAM = ['es-mx', 'es-us', 'es-419', 'es-ar', 'es-co', 'es-cl', 'es-pe', 'es-ve'];
+    // Nombres de voces masculinas habituales (Windows/Edge, macOS/iOS, Android)
+    const MASCULINA = /(jorge|juan|diego|carlos|pablo|ra[uú]l|andr[eé]s|gonzalo|enrique|alonso|tom[aá]s|gerardo|lorenzo|male|hombre|masculin)/i;
+
+    function elegirVoz(voces) {
+        const lang = v => v.lang.replace('_', '-').toLowerCase();
+        const es = voces.filter(v => lang(v).startsWith('es'));
+        const latam = es.filter(v => LATAM.includes(lang(v)));
+        return latam.find(v => MASCULINA.test(v.name))
+            || es.find(v => MASCULINA.test(v.name))
+            || latam[0] || es[0] || null;
+    }
+
+    function hablar() {
+        if (esBienvenida && ventana.__formulaBienvenida) return;
+        const voz = elegirVoz(synth.getVoices());
+        const utterance = new SpeechSynthesisUtterance(__TEXTO__);
+        if (voz) { utterance.voice = voz; }
+        utterance.lang = voz ? voz.lang : 'es-MX';
+        // Si no hay voz masculina instalada, se baja el tono para que suene más grave
+        utterance.pitch = (voz && MASCULINA.test(voz.name)) ? 1.0 : 0.7;
+        utterance.rate = 1.0;
+        utterance.onstart = () => { if (esBienvenida) ventana.__formulaBienvenida = true; };
+        // Si el navegador bloquea el audio antes de que el usuario interactúe, se reintenta en el primer clic o tecla
+        utterance.onerror = (e) => {
+            if (e.error === 'not-allowed') {
+                const reintentar = () => hablar();
+                ventana.document.addEventListener('pointerdown', reintentar, { once: true });
+                ventana.document.addEventListener('keydown', reintentar, { once: true });
+            }
+        };
+        synth.cancel();
+        synth.speak(utterance);
+    }
+
+    // Algunos navegadores cargan la lista de voces con retraso
+    if (synth.getVoices().length) {
+        hablar();
+    } else {
+        let hecho = false;
+        synth.onvoiceschanged = () => { if (!hecho) { hecho = true; hablar(); } };
+        setTimeout(() => { if (!hecho) { hecho = true; hablar(); } }, 1000);
+    }
+</script>
+"""
+
+
+# Función de síntesis de voz (IA habla)
+def speak(text, bienvenida=False):
     # Quita símbolos de markdown para que no se lean en voz alta
     clean_text = re.sub(r"[*_#`>\[\]]", "", text).replace("\n", " ")
     # json.dumps escapa comillas, barras y saltos de línea de forma segura para JS
-    js_text = json.dumps(clean_text)
-    js_code = f"""
-    <script>
-        let synth;
-        try {{ synth = window.parent.speechSynthesis; }} catch (e) {{ synth = window.speechSynthesis; }}
-        if (!synth) {{ synth = window.speechSynthesis; }}
-
-        // Variantes de español de Latinoamérica
-        const LATAM = ['es-mx', 'es-us', 'es-419', 'es-ar', 'es-co', 'es-cl', 'es-pe', 'es-ve'];
-        // Nombres de voces masculinas habituales (Windows/Edge, macOS/iOS, Android)
-        const MASCULINA = /(jorge|juan|diego|carlos|pablo|ra[uú]l|andr[eé]s|gonzalo|enrique|alonso|tom[aá]s|gerardo|lorenzo|male|hombre|masculin)/i;
-
-        function elegirVoz(voces) {{
-            const lang = v => v.lang.replace('_', '-').toLowerCase();
-            const es = voces.filter(v => lang(v).startsWith('es'));
-            const latam = es.filter(v => LATAM.includes(lang(v)));
-            return latam.find(v => MASCULINA.test(v.name))
-                || es.find(v => MASCULINA.test(v.name))
-                || latam[0] || es[0] || null;
-        }}
-
-        function hablar() {{
-            const voz = elegirVoz(synth.getVoices());
-            const utterance = new SpeechSynthesisUtterance({js_text});
-            if (voz) {{ utterance.voice = voz; }}
-            utterance.lang = voz ? voz.lang : 'es-MX';
-            // Si no hay voz masculina instalada, se baja el tono para que suene más grave
-            utterance.pitch = (voz && MASCULINA.test(voz.name)) ? 1.0 : 0.7;
-            utterance.rate = 1.0;
-            synth.cancel();
-            synth.speak(utterance);
-        }}
-
-        // Algunos navegadores cargan la lista de voces con retraso
-        if (synth.getVoices().length) {{
-            hablar();
-        }} else {{
-            let hecho = false;
-            synth.onvoiceschanged = () => {{ if (!hecho) {{ hecho = true; hablar(); }} }};
-            setTimeout(() => {{ if (!hecho) {{ hecho = true; hablar(); }} }}, 1000);
-        }}
-    </script>
-    """
+    js_code = VOZ_JS.replace("__TEXTO__", json.dumps(clean_text)).replace("__BIENVENIDA__", "true" if bienvenida else "false")
     components.html(js_code, height=0)
+
+
+# Saludo según la hora de Santiago
+def frase_bienvenida():
+    hora = datetime.now(ZoneInfo("America/Santiago")).hour
+    saludo = "Buenos días" if 5 <= hora < 12 else "Buenas tardes" if hora < 20 else "Buenas noches"
+    return f"{saludo}. Sistema Fórmula en línea y a su disposición."
+
+
+# Botón 🔇 que detiene la voz al instante (brilla mientras el agente habla)
+BOTON_SILENCIO_HTML = """
+<style>
+    body { margin: 0; background: transparent; }
+    button {
+        width: 100%; height: 38px; cursor: pointer; font-size: 18px;
+        background: rgba(0, 229, 255, 0.08); color: #00e5ff;
+        border: 1px solid #00e5ff; border-radius: 12px; transition: all 0.2s;
+    }
+    button:hover { background: rgba(0, 229, 255, 0.2); }
+    button.hablando { background: rgba(0, 229, 255, 0.25); box-shadow: 0 0 14px #00e5ff; animation: pulso 1.2s infinite; }
+    @keyframes pulso { 50% { box-shadow: 0 0 4px #00e5ff; } }
+</style>
+<button id="silencio" title="Detener la voz">🔇</button>
+<script>
+    const synth = window.parent.speechSynthesis;
+    const boton = document.getElementById('silencio');
+    boton.onclick = () => synth.cancel();
+    setInterval(() => boton.classList.toggle('hablando', synth.speaking), 300);
+</script>
+"""
+
+
+# Frase corta que se lee en voz alta (máximo 2 oraciones)
+def frase_hablada(texto):
+    m = PATRON_VOZ.search(texto)
+    frase = m.group(1) if m else FRASE_POR_DEFECTO
+    oraciones = re.split(r"(?<=[.!?])\s+", frase.strip())
+    return " ".join(oraciones[:2])
 
 
 # Lee un .csv o .xlsx cargado y devuelve {nombre_de_tabla: DataFrame}
@@ -454,6 +516,7 @@ def extraer_archivos(texto):
 
 # Texto de la respuesta sin el contenido de los archivos (para mostrar y leer en voz alta)
 def texto_visible(texto):
+    texto = PATRON_VOZ.sub(lambda m: f"*{m.group(1)}*\n\n", texto)
     return PATRON_ARCHIVO.sub(lambda m: f"\n\n📎 *Archivo generado: {m.group(1)}* (ver panel de descargas)\n\n", texto).strip()
 
 
@@ -483,6 +546,11 @@ def check_password():
 if check_password():
     # Cabecera animada con reactor ARC y reloj
     components.html(CABECERA_HTML.replace("__MODELO__", "CLAUDE SONNET 5.5"), height=150)
+
+    # Saludo hablado al entrar (suena una sola vez por visita)
+    if "bienvenida" not in st.session_state:
+        st.session_state.bienvenida = frase_bienvenida()
+    speak(st.session_state.bienvenida, bienvenida=True)
 
     # Layout de 3 columnas estilo interfaz Stark (Paneles laterales + Núcleo Central)
     col_left, col_center, col_right = st.columns([1.2, 2.6, 1.2], gap="medium")
@@ -532,7 +600,7 @@ if check_password():
 
     # --- PANEL CENTRAL: Cuadro de Diálogo Principal ---
     with col_center:
-        panel("Núcleo de diálogo operativo", '<p class="hud-text">Escriba o dicte sus directrices. El núcleo responde por texto y voz.</p>')
+        panel("Núcleo de diálogo operativo", '<p class="hud-text">Escriba o dicte sus directrices. Los reportes y hallazgos se muestran aquí por escrito.</p>')
 
         if "anthropic_api_key" in st.secrets:
             client = anthropic.Anthropic(api_key=st.secrets["anthropic_api_key"])
@@ -565,8 +633,8 @@ if check_password():
                     with st.chat_message(message["role"]):
                         st.markdown(texto_visible(message["content"]))
 
-            # Entrada de comandos: caja de texto + botón de micrófono al lado
-            col_texto, col_mic = st.columns([9, 1], vertical_alignment="bottom")
+            # Entrada de comandos: caja de texto + micrófono + botón para silenciar la voz
+            col_texto, col_mic, col_silencio = st.columns([8, 1, 1], vertical_alignment="bottom")
             with col_texto:
                 texto_escrito = st.chat_input("Introduzca directrices operativas o hable con el sistema...")
             with col_mic:
@@ -579,6 +647,8 @@ if check_password():
                     use_container_width=True,
                     key="microfono",
                 )
+            with col_silencio:
+                components.html(BOTON_SILENCIO_HTML, height=40)
 
             prompt = texto_escrito or texto_hablado
 
@@ -614,8 +684,8 @@ if check_password():
                             respuesta_visible = texto_visible(full_response)
                             message_placeholder.markdown(respuesta_visible)
 
-                            # Ejecuta la voz sintética (sin leer el contenido de los archivos)
-                            speak(respuesta_visible)
+                            # Solo se lee en voz alta la frase corta; el reporte queda en pantalla
+                            speak(frase_hablada(full_response))
 
                             st.session_state.messages.append({"role": "assistant", "content": full_response})
                         except Exception as e:
@@ -651,7 +721,7 @@ if check_password():
 
         panel("Interacción por voz", """
             <p class="hud-text">Pulse <b style="color:#00e5ff">🎙️</b> para dictar una directriz y <b style="color:#00e5ff">⏹️</b> para enviarla.
-            Cada respuesta del núcleo se transmite con voz masculina en español latino.</p>
+            El núcleo confirma cada respuesta con una frase breve en voz alta; pulse <b style="color:#00e5ff">🔇</b> para silenciarlo.</p>
         """)
 
     # Alinea la caja de chat con el panel "Interacción por voz"
