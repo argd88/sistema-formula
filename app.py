@@ -1,19 +1,26 @@
+import base64
 import io
 import json
 import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import markdown
 import pandas as pd
 import streamlit as st
 import anthropic
 import streamlit.components.v1 as components
+from fpdf import FPDF
+from fpdf.fonts import FontFace
 from streamlit_mic_recorder import speech_to_text
 
 MODEL = "claude-sonnet-5-5"
 
 # Límite de caracteres de datos que se envían al modelo (para no exceder su contexto)
 MAX_CARACTERES_DATOS = 400_000
+
+# Límite de tamaño de los PDF cargados (la API acepta hasta 32 MB por petición)
+MAX_MB_PDF = 20
 
 # Altura del historial del chat (px): define a qué altura queda la caja de escritura
 CHAT_ALTURA = 300
@@ -25,13 +32,13 @@ SYSTEM_PROMPT = """Eres F.O.R.M.U.L.A., una inteligencia artificial analítica a
 2. Después de esa etiqueta escribe en pantalla el contenido completo: reportes, análisis, hallazgos, tablas y recomendaciones, en Markdown. Nunca pongas el reporte dentro de <voz>.
 Si la respuesta es solo una conversación breve, basta con la frase de <voz>.
 
-Puedes analizar los archivos de datos que el usuario cargue; su contenido aparece más abajo en formato CSV.
+Puedes analizar los archivos de datos que el usuario cargue: las tablas (.xlsx, .csv) aparecen más abajo en formato CSV y los documentos PDF se adjuntan al inicio de la conversación (puedes leer su texto, tablas e imágenes).
 
 Cuando el usuario te pida crear o exportar un archivo, escribe su contenido completo dentro de una etiqueta así:
 <archivo nombre="nombre_del_archivo.ext">
 contenido
 </archivo>
-Formatos permitidos: .xlsx, .pdf, .csv, .txt, .md, .json. Para .xlsx y .csv escribe el contenido como CSV separado por comas, con una fila de encabezados; el sistema lo convierte a Excel automáticamente. No uses bloques de código dentro de la etiqueta. Fuera de la etiqueta, explica en una o dos frases qué contiene el archivo."""
+Formatos permitidos: .pdf, .xlsx, .csv, .txt, .md, .json. Para .pdf escribe el contenido en Markdown (títulos con #, listas, **negritas** y tablas con |); el sistema lo convierte en un documento PDF con formato. Para .xlsx y .csv escribe el contenido como CSV separado por comas, con una fila de encabezados; el sistema lo convierte a Excel automáticamente. No uses bloques de código dentro de la etiqueta. Fuera de la etiqueta, explica en una o dos frases qué contiene el archivo."""
 
 PATRON_VOZ = re.compile(r"<voz>\s*(.*?)\s*</voz>", re.DOTALL)
 FRASE_POR_DEFECTO = "Análisis completado. Los resultados están en pantalla."
@@ -44,6 +51,7 @@ MIME_TYPES = {
     ".txt": "text/plain",
     ".md": "text/markdown",
     ".json": "application/json",
+    ".pdf": "application/pdf",
 }
 
 # Configuración de la página HUD
@@ -487,6 +495,72 @@ def datos_para_modelo(tablas):
     return "\n\n".join(partes), recortado
 
 
+# Las fuentes estándar del PDF solo admiten caracteres latinos (incluye tildes y ñ):
+# se reemplazan comillas tipográficas, guiones largos, emojis, etc.
+def a_latin1(texto):
+    reemplazos = {"“": '"', "”": '"', "‘": "'", "’": "'", "–": "-", "—": "-", "…": "...", "•": "-", "→": "->", "≥": ">=", "≤": "<=", "✓": "OK", "✔": "OK", "✗": "X", "€": "EUR"}
+    for original, nuevo in reemplazos.items():
+        texto = texto.replace(original, nuevo)
+    return texto.encode("latin-1", "ignore").decode("latin-1")
+
+
+class ReportePDF(FPDF):
+    # Cabecera y pie de página con el estilo de F.O.R.M.U.L.A.
+    def header(self):
+        self.set_fill_color(2, 8, 20)
+        self.rect(0, 0, self.w, 16, "F")
+        self.set_fill_color(0, 229, 255)
+        self.rect(0, 16, self.w, 0.8, "F")
+        self.set_xy(12, 4)
+        self.set_font("Helvetica", "B", 11)
+        self.set_text_color(0, 229, 255)
+        self.cell(0, 8, "F.O.R.M.U.L.A.", align="L")
+        self.set_xy(12, 4)
+        self.set_font("Helvetica", "", 9)
+        self.set_text_color(160, 200, 220)
+        self.cell(0, 8, datetime.now(ZoneInfo("America/Santiago")).strftime("%d/%m/%Y %H:%M"), align="R")
+        self.set_y(24)
+
+    def footer(self):
+        self.set_y(-12)
+        self.set_font("Helvetica", "", 8)
+        self.set_text_color(130, 130, 130)
+        self.cell(0, 8, f"Página {self.page_no()} de {{nb}}", align="C")
+
+
+# Convierte el Markdown que escribe el agente en un PDF con títulos, listas y tablas
+def markdown_a_pdf(contenido):
+    def nuevo_pdf():
+        pdf = ReportePDF(format="A4")
+        pdf.set_margins(15, 15, 15)
+        pdf.set_auto_page_break(True, margin=18)
+        pdf.add_page()
+        pdf.set_text_color(20, 20, 20)
+        return pdf
+
+    try:
+        pdf = nuevo_pdf()
+        html = markdown.markdown(a_latin1(contenido), extensions=["tables", "sane_lists"])
+        azul = (10, 60, 110)
+        pdf.write_html(
+            html,
+            font_family="helvetica",
+            li_prefix_color=azul,
+            table_line_separators=True,
+            tag_styles={
+                "h1": FontFace(color=azul, size_pt=20, emphasis="B"),
+                "h2": FontFace(color=azul, size_pt=15, emphasis="B"),
+                "h3": FontFace(color=azul, size_pt=12, emphasis="B"),
+            },
+        )
+    except Exception:
+        # Si el formato es demasiado complejo, se entrega el texto sin formato
+        pdf = nuevo_pdf()
+        pdf.set_font("Helvetica", "", 11)
+        pdf.multi_cell(0, 6, a_latin1(contenido))
+    return bytes(pdf.output())
+
+
 # Separa los archivos generados por el agente del texto de la respuesta
 def extraer_archivos(texto):
     archivos = []
@@ -505,6 +579,8 @@ def extraer_archivos(texto):
                 # Si el contenido no es una tabla válida, se entrega como CSV
                 nombre, extension = nombre[:-5] + ".csv", ".csv"
                 datos = contenido.encode("utf-8-sig")
+        elif extension == ".pdf":
+            datos = markdown_a_pdf(contenido)
         elif extension == ".csv":
             # utf-8-sig para que Excel muestre bien las tildes
             datos = contenido.encode("utf-8-sig")
@@ -512,6 +588,24 @@ def extraer_archivos(texto):
             datos = contenido.encode("utf-8")
         archivos.append({"nombre": nombre, "datos": datos, "mime": MIME_TYPES[extension]})
     return archivos
+
+
+# Arma los mensajes para la API; los PDF cargados se adjuntan como documentos en el primer mensaje
+def mensajes_para_api(historial, pdfs):
+    mensajes = [{"role": m["role"], "content": m["content"]} for m in historial]
+    if pdfs and mensajes:
+        documentos = [
+            {
+                "type": "document",
+                "source": {"type": "base64", "media_type": "application/pdf", "data": datos},
+                "title": nombre,
+            }
+            for nombre, datos in pdfs.items()
+        ]
+        # Caché para no pagar el PDF completo en cada mensaje
+        documentos[-1]["cache_control"] = {"type": "ephemeral"}
+        mensajes[0] = {"role": "user", "content": documentos + [{"type": "text", "text": mensajes[0]["content"]}]}
+    return mensajes
 
 
 # Texto de la respuesta sin el contenido de los archivos (para mostrar y leer en voz alta)
@@ -579,16 +673,25 @@ if check_password():
         """)
 
         # --- Carga de archivos de datos ---
-        panel("Carga de datos", '<p class="hud-text">Suba archivos .xlsx o .csv para que el núcleo los analice.</p>')
+        panel("Carga de datos", '<p class="hud-text">Suba archivos .xlsx, .csv o .pdf para que el núcleo los analice.</p>')
         archivos_cargados = st.file_uploader(
             "Archivos de datos",
-            type=["xlsx", "csv"],
+            type=["xlsx", "csv", "pdf"],
             accept_multiple_files=True,
             label_visibility="collapsed",
         )
 
         tablas = {}
+        pdfs = {}
         for archivo in archivos_cargados or []:
+            if archivo.name.lower().endswith(".pdf"):
+                tamano_mb = archivo.size / 1_000_000
+                if tamano_mb > MAX_MB_PDF:
+                    st.error(f"{archivo.name} pesa {tamano_mb:.0f} MB; el máximo es {MAX_MB_PDF} MB.")
+                else:
+                    pdfs[archivo.name] = base64.standard_b64encode(archivo.getvalue()).decode()
+                    st.caption(f"📄 {archivo.name} ({tamano_mb:.1f} MB) · adjuntado al núcleo")
+                continue
             try:
                 tablas.update(leer_archivo(archivo.name, archivo.getvalue()))
             except Exception as e:
@@ -665,7 +768,7 @@ if check_password():
                                 model=MODEL,
                                 max_tokens=16000,
                                 system=system,
-                                messages=[{"role": m["role"], "content": m["content"]} for m in st.session_state.messages],
+                                messages=mensajes_para_api(st.session_state.messages, pdfs),
                             )
 
                             # La respuesta puede incluir bloques de razonamiento; solo se usan los de texto
@@ -698,7 +801,7 @@ if check_password():
     # --- PANEL DERECHO: Descargas, Noticias y Actividad ---
     with col_right:
         # --- Archivos creados por el agente ---
-        panel("Archivos generados", '<p class="hud-text">Pida al núcleo que cree un archivo (Excel, CSV, texto…) y aparecerá aquí.</p>')
+        panel("Archivos generados", '<p class="hud-text">Pida al núcleo que cree un archivo (PDF, Excel, CSV, texto…) y aparecerá aquí.</p>')
         archivos_generados = st.session_state.get("archivos_generados", [])
         for i, archivo in enumerate(reversed(archivos_generados)):
             st.download_button(
