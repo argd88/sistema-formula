@@ -1,3 +1,5 @@
 streamlit>=1.40
 anthropic>=0.70
 streamlit-mic-recorder>=0.0.8
+pandas>=2.0
+openpyxl>=3.1
