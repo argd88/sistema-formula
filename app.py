@@ -278,7 +278,7 @@ CABECERA_HTML = """
         <div class="reactor"><div class="ring r1"></div><div class="ring r2"></div><div class="ring r3"></div><div class="core"></div></div>
         <div>
             <h1>F.O.R.M.U.L.A.</h1>
-            <div class="sub">ASISTENTE ANALÍTICO PERSONAL DE ANDREINA GUTIERREZ DE DOMENICO</div>
+            <div class="sub">ASISTENTE ANALÍTICO PERSONAL DE ANDREINA GUTIERREZ</div>
             <div class="estado">
                 <span class="pill"><span class="dot"></span>SISTEMA ONLINE</span>
                 <span class="pill">NÚCLEO: __MODELO__</span>
