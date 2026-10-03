@@ -1,12 +1,37 @@
+import io
 import json
 import re
 
+import pandas as pd
 import streamlit as st
 import anthropic
 import streamlit.components.v1 as components
 from streamlit_mic_recorder import speech_to_text
 
 MODEL = "claude-sonnet-5-5"
+
+# Límite de caracteres de datos que se envían al modelo (para no exceder su contexto)
+MAX_CARACTERES_DATOS = 400_000
+
+SYSTEM_PROMPT = """Eres F.O.R.M.U.L.A., una inteligencia artificial analítica avanzada con la estética, precisión y el tono sofisticado de JARVIS en las películas de Tony Stark. Respondes de forma concisa, técnica y ejecutiva en español latinoamericano.
+
+Puedes analizar los archivos de datos que el usuario cargue; su contenido aparece más abajo en formato CSV.
+
+Cuando el usuario te pida crear o exportar un archivo, escribe su contenido completo dentro de una etiqueta así:
+<archivo nombre="nombre_del_archivo.ext">
+contenido
+</archivo>
+Formatos permitidos: .xlsx, .csv, .txt, .md, .json. Para .xlsx y .csv escribe el contenido como CSV separado por comas, con una fila de encabezados; el sistema lo convierte a Excel automáticamente. No uses bloques de código dentro de la etiqueta. Fuera de la etiqueta, explica en una o dos frases qué contiene el archivo."""
+
+PATRON_ARCHIVO = re.compile(r'<archivo\s+nombre="([^"]+)"\s*>\s*(.*?)\s*</archivo>', re.DOTALL)
+
+MIME_TYPES = {
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".csv": "text/csv",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".json": "application/json",
+}
 
 # Configuración de la página HUD
 st.set_page_config(
@@ -70,6 +95,13 @@ st.markdown("""
     [data-testid="stChatInput"] textarea::placeholder {
         color: #555555 !important;
     }
+
+    /* Textos de la carga de archivos visibles sobre el fondo oscuro */
+    [data-testid="stFileUploader"] label,
+    [data-testid="stFileUploader"] small,
+    [data-testid="stFileUploaderFileName"] {
+        color: #93c5fd !important;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -123,6 +155,69 @@ def speak(text):
     </script>
     """
     components.html(js_code, height=0)
+
+
+# Lee un .csv o .xlsx cargado y devuelve {nombre_de_tabla: DataFrame}
+@st.cache_data(show_spinner=False)
+def leer_archivo(nombre, contenido):
+    if nombre.lower().endswith(".csv"):
+        try:
+            return {nombre: pd.read_csv(io.BytesIO(contenido))}
+        except UnicodeDecodeError:
+            # CSV exportados desde Excel en español suelen venir en latin-1 y con ;
+            return {nombre: pd.read_csv(io.BytesIO(contenido), encoding="latin-1", sep=None, engine="python")}
+    # Excel: se leen todas las hojas
+    hojas = pd.read_excel(io.BytesIO(contenido), sheet_name=None)
+    return {f"{nombre} / hoja {hoja}": df for hoja, df in hojas.items()}
+
+
+# Convierte las tablas cargadas en texto para el modelo; avisa si hubo que recortar
+def datos_para_modelo(tablas):
+    partes = []
+    recortado = False
+    restante = MAX_CARACTERES_DATOS
+    for nombre, df in tablas.items():
+        csv = df.to_csv(index=False)
+        encabezado = f"### Archivo: {nombre} ({len(df)} filas, {len(df.columns)} columnas)\n"
+        if len(csv) > restante:
+            csv = csv[:max(restante, 0)].rsplit("\n", 1)[0]
+            encabezado += "AVISO: los datos están recortados por tamaño; solo se incluyen las primeras filas.\n"
+            recortado = True
+        restante -= len(csv)
+        partes.append(encabezado + csv)
+    return "\n\n".join(partes), recortado
+
+
+# Separa los archivos generados por el agente del texto de la respuesta
+def extraer_archivos(texto):
+    archivos = []
+    for nombre, contenido in PATRON_ARCHIVO.findall(texto):
+        # Por si el modelo envolvió el contenido en ``` igualmente
+        contenido = re.sub(r"^```\w*\n|\n?```$", "", contenido.strip())
+        extension = "." + nombre.rsplit(".", 1)[-1].lower() if "." in nombre else ".txt"
+        if extension not in MIME_TYPES:
+            nombre, extension = nombre + ".txt", ".txt"
+        if extension == ".xlsx":
+            try:
+                buffer = io.BytesIO()
+                pd.read_csv(io.StringIO(contenido)).to_excel(buffer, index=False)
+                datos = buffer.getvalue()
+            except Exception:
+                # Si el contenido no es una tabla válida, se entrega como CSV
+                nombre, extension = nombre[:-5] + ".csv", ".csv"
+                datos = contenido.encode("utf-8-sig")
+        elif extension == ".csv":
+            # utf-8-sig para que Excel muestre bien las tildes
+            datos = contenido.encode("utf-8-sig")
+        else:
+            datos = contenido.encode("utf-8")
+        archivos.append({"nombre": nombre, "datos": datos, "mime": MIME_TYPES[extension]})
+    return archivos
+
+
+# Texto de la respuesta sin el contenido de los archivos (para mostrar y leer en voz alta)
+def texto_visible(texto):
+    return PATRON_ARCHIVO.sub(lambda m: f"\n\n📎 *Archivo generado: {m.group(1)}* (ver panel de descargas)\n\n", texto).strip()
 
 
 # Validación de seguridad de acceso
@@ -185,6 +280,31 @@ if check_password():
             </div>
         """, unsafe_allow_html=True)
 
+        # --- Carga de archivos de datos ---
+        st.markdown("""
+            <div class="hud-panel">
+                <div class="hud-title">📂 Carga de Datos</div>
+                <p style="font-size: 11px; color: #93c5fd; margin: 0;">Suba archivos .xlsx o .csv para que el núcleo los analice.</p>
+            </div>
+        """, unsafe_allow_html=True)
+        archivos_cargados = st.file_uploader(
+            "Archivos de datos",
+            type=["xlsx", "csv"],
+            accept_multiple_files=True,
+            label_visibility="collapsed",
+        )
+
+        tablas = {}
+        for archivo in archivos_cargados or []:
+            try:
+                tablas.update(leer_archivo(archivo.name, archivo.getvalue()))
+            except Exception as e:
+                st.error(f"No se pudo leer {archivo.name}: {e}")
+
+        for nombre, df in tablas.items():
+            with st.expander(f"👁️ {nombre} ({len(df)} filas)"):
+                st.dataframe(df.head(50), use_container_width=True)
+
     # --- PANEL CENTRAL: Cuadro de Diálogo Principal ---
     with col_center:
         st.markdown("""
@@ -199,12 +319,24 @@ if check_password():
             if "messages" not in st.session_state:
                 st.session_state.messages = []
 
+            # Instrucciones + datos cargados; el bloque de datos se guarda en caché para no pagarlo en cada mensaje
+            system = [{"type": "text", "text": SYSTEM_PROMPT}]
+            if tablas:
+                texto_datos, recortado = datos_para_modelo(tablas)
+                system.append({
+                    "type": "text",
+                    "text": "## Archivos cargados por el usuario\n\n" + texto_datos,
+                    "cache_control": {"type": "ephemeral"},
+                })
+                if recortado:
+                    st.warning("Los archivos son muy grandes: el núcleo solo recibirá las primeras filas.")
+
             # Contenedor del historial de chat en el centro
             chat_container = st.container()
             with chat_container:
                 for message in st.session_state.messages:
                     with st.chat_message(message["role"]):
-                        st.markdown(message["content"])
+                        st.markdown(texto_visible(message["content"]))
 
             # Entrada de comandos: caja de texto + botón de micrófono al lado
             col_texto, col_mic = st.columns([5, 1], vertical_alignment="bottom")
@@ -234,8 +366,8 @@ if check_password():
                         try:
                             response = client.messages.create(
                                 model=MODEL,
-                                max_tokens=4000,
-                                system="Eres F.O.R.M.U.L.A., una inteligencia artificial analítica avanzada con la estética, precisión y el tono sofisticado de JARVIS en las películas de Tony Stark. Respondes de forma concisa, técnica y ejecutiva en español latinoamericano.",
+                                max_tokens=16000,
+                                system=system,
                                 messages=[{"role": m["role"], "content": m["content"]} for m in st.session_state.messages],
                             )
 
@@ -244,10 +376,19 @@ if check_password():
                                 b.text for b in response.content if b.type == "text"
                             ).strip()
 
-                            message_placeholder.markdown(full_response)
+                            if response.stop_reason == "max_tokens":
+                                st.warning("La respuesta se cortó por longitud; un archivo muy grande puede haber quedado incompleto.")
 
-                            # Ejecuta la voz sintética
-                            speak(full_response)
+                            # Guarda los archivos que haya creado el agente para el panel de descargas
+                            if "archivos_generados" not in st.session_state:
+                                st.session_state.archivos_generados = []
+                            st.session_state.archivos_generados.extend(extraer_archivos(full_response))
+
+                            respuesta_visible = texto_visible(full_response)
+                            message_placeholder.markdown(respuesta_visible)
+
+                            # Ejecuta la voz sintética (sin leer el contenido de los archivos)
+                            speak(respuesta_visible)
 
                             st.session_state.messages.append({"role": "assistant", "content": full_response})
                         except Exception as e:
@@ -257,8 +398,29 @@ if check_password():
         else:
             st.warning("Falta configurar la clave de Anthropic en los secretos.")
 
-    # --- PANEL DERECHO: Sección de Noticias y Actividad ---
+    # --- PANEL DERECHO: Descargas, Noticias y Actividad ---
     with col_right:
+        # --- Archivos creados por el agente ---
+        st.markdown("""
+            <div class="hud-panel">
+                <div class="hud-title">📥 Archivos Generados</div>
+                <p style="font-size: 11px; color: #93c5fd; margin: 0;">Pida al núcleo que cree un archivo (Excel, CSV, texto…) y aparecerá aquí.</p>
+            </div>
+        """, unsafe_allow_html=True)
+        archivos_generados = st.session_state.get("archivos_generados", [])
+        for i, archivo in enumerate(reversed(archivos_generados)):
+            st.download_button(
+                f"⬇️ {archivo['nombre']}",
+                data=archivo["datos"],
+                file_name=archivo["nombre"],
+                mime=archivo["mime"],
+                key=f"descarga_{len(archivos_generados) - i}",
+                use_container_width=True,
+            )
+        if archivos_generados and st.button("🗑️ Limpiar lista", use_container_width=True):
+            st.session_state.archivos_generados = []
+            st.rerun()
+
         st.markdown("""
             <div class="hud-panel">
                 <div class="hud-title">📰 Feed de Noticias Globales</div>
