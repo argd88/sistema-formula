@@ -31,7 +31,7 @@ Cuando el usuario te pida crear o exportar un archivo, escribe su contenido comp
 <archivo nombre="nombre_del_archivo.ext">
 contenido
 </archivo>
-Formatos permitidos: .xlsx, .csv, .txt, .md, .json. Para .xlsx y .csv escribe el contenido como CSV separado por comas, con una fila de encabezados; el sistema lo convierte a Excel automáticamente. No uses bloques de código dentro de la etiqueta. Fuera de la etiqueta, explica en una o dos frases qué contiene el archivo."""
+Formatos permitidos: .xlsx, .pdf, .csv, .txt, .md, .json. Para .xlsx y .csv escribe el contenido como CSV separado por comas, con una fila de encabezados; el sistema lo convierte a Excel automáticamente. No uses bloques de código dentro de la etiqueta. Fuera de la etiqueta, explica en una o dos frases qué contiene el archivo."""
 
 PATRON_VOZ = re.compile(r"<voz>\s*(.*?)\s*</voz>", re.DOTALL)
 FRASE_POR_DEFECTO = "Análisis completado. Los resultados están en pantalla."
