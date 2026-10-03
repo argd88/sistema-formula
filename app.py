@@ -86,7 +86,7 @@ def check_password():
 
 if check_password():
     # Cabecera principal estilo HUD
-    st.markdown("<h1 style='text-align: center;'>⚡ F.O.R.M.U.L.A.>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align: center;'>⚡ F.O.R.M.U.L.A. ⚡", unsafe_allow_html=True)
     st.markdown("<p style='text-align: center; color: #60a5fa; font-size: 12px;'>SISTEMA CENTRAL: ONLINE | NÚCLEO: CLAUDE 3.5 SONNET | ENLACE NEURONAL ACTIVO</p>", unsafe_allow_html=True)
     st.markdown("---")
 
