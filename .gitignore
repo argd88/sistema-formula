@@ -1,0 +1,4 @@
+# Nunca subir las claves a GitHub
+.streamlit/secrets.toml
+.env
+__pycache__/
