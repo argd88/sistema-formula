@@ -13,6 +13,9 @@ MODEL = "claude-sonnet-5-5"
 # Límite de caracteres de datos que se envían al modelo (para no exceder su contexto)
 MAX_CARACTERES_DATOS = 400_000
 
+# Altura del historial del chat (px): define a qué altura queda la caja de escritura
+CHAT_ALTURA = 300
+
 SYSTEM_PROMPT = """Eres F.O.R.M.U.L.A., una inteligencia artificial analítica avanzada con la estética, precisión y el tono sofisticado de JARVIS en las películas de Tony Stark. Respondes de forma concisa, técnica y ejecutiva en español latinoamericano.
 
 Puedes analizar los archivos de datos que el usuario cargue; su contenido aparece más abajo en formato CSV.
@@ -304,6 +307,32 @@ CABECERA_HTML = """
 """
 
 
+# Ajusta la altura del historial para que la caja de escritura quede a la altura
+# del título "Interacción por voz", sea cual sea el ancho de la pantalla
+ALINEAR_CHAT_JS = """
+<script>
+    const doc = window.parent.document;
+    function alinear() {
+        const titulo = [...doc.querySelectorAll('.hud-title')]
+            .find(e => e.textContent.toLowerCase().includes('interacción por voz'));
+        const historial = doc.querySelector('.st-key-chat_historial');
+        const entrada = doc.querySelector('[data-testid="stChatInput"]');
+        if (!titulo || !historial || !entrada) return;
+        // Streamlit fija la altura en el contenedor que envuelve al historial
+        const caja = historial.parentElement;
+        // En celulares las columnas se apilan: se deja la altura original
+        if (window.parent.innerWidth < 640) { caja.style.flex = ''; caja.style.height = ''; return; }
+        const diferencia = titulo.getBoundingClientRect().top - entrada.getBoundingClientRect().top;
+        if (Math.abs(diferencia) < 2) return;
+        const alto = Math.max(__MINIMO__, caja.getBoundingClientRect().height + diferencia);
+        caja.style.flex = '0 0 ' + alto + 'px';
+        caja.style.height = alto + 'px';
+    }
+    setInterval(alinear, 400);
+</script>
+"""
+
+
 # Panel HUD reutilizable
 def panel(titulo, contenido):
     # Se quitan las sangrías para que Markdown no lo confunda con un bloque de código
@@ -524,11 +553,11 @@ if check_password():
                     st.warning("Los archivos son muy grandes: el núcleo solo recibirá las primeras filas.")
 
             # Contenedor del historial de chat en el centro
-            chat_container = st.container(height=520, border=False)
+            chat_container = st.container(height=CHAT_ALTURA, border=False, key="chat_historial")
             with chat_container:
                 if not st.session_state.messages:
                     st.markdown(
-                        '<div style="text-align:center; padding-top:170px; font-family:Orbitron; letter-spacing:4px; '
+                        '<div style="text-align:center; padding-top:90px; font-family:Orbitron; letter-spacing:4px; '
                         'color:#7fb8d6; font-size:13px;">SISTEMA LISTO · ESPERANDO DIRECTRICES</div>',
                         unsafe_allow_html=True,
                     )
@@ -537,15 +566,15 @@ if check_password():
                         st.markdown(texto_visible(message["content"]))
 
             # Entrada de comandos: caja de texto + botón de micrófono al lado
-            col_texto, col_mic = st.columns([5, 1], vertical_alignment="bottom")
+            col_texto, col_mic = st.columns([9, 1], vertical_alignment="bottom")
             with col_texto:
                 texto_escrito = st.chat_input("Introduzca directrices operativas o hable con el sistema...")
             with col_mic:
                 # Graba la voz y la convierte a texto en el navegador (Chrome/Edge)
                 texto_hablado = speech_to_text(
                     language="es-MX",
-                    start_prompt="🎙️ Hablar",
-                    stop_prompt="⏹️ Enviar",
+                    start_prompt="🎙️",
+                    stop_prompt="⏹️",
                     just_once=True,
                     use_container_width=True,
                     key="microfono",
@@ -621,6 +650,9 @@ if check_password():
         """)
 
         panel("Interacción por voz", """
-            <p class="hud-text">Pulse <b style="color:#00e5ff">🎙️ Hablar</b> para dictar una directriz y <b style="color:#00e5ff">⏹️ Enviar</b> al terminar.
+            <p class="hud-text">Pulse <b style="color:#00e5ff">🎙️</b> para dictar una directriz y <b style="color:#00e5ff">⏹️</b> para enviarla.
             Cada respuesta del núcleo se transmite con voz masculina en español latino.</p>
         """)
+
+    # Alinea la caja de chat con el panel "Interacción por voz"
+    components.html(ALINEAR_CHAT_JS.replace("__MINIMO__", "220"), height=0)
